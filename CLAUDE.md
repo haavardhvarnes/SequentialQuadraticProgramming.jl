@@ -101,8 +101,25 @@ Default: auto-selects `AutoForwardDiff()`, falls back to `AutoFiniteDiff()` if F
 - **v0.2.0**: MathOptInterface extension for JuMP integration
 - **v0.3.0**: Exact MOI evaluator derivatives, L-BFGS fallback, optional derivative kwargs
 - **v0.4.0** (current): DifferentiationInterface.jl pluggable AD backends
-- **v0.5.0** (current): Clarabel extension (alternative QP solver via package extension)
-- **v0.6.0**: Trust region globalization variant
+- **v0.5.0**: Clarabel extension (alternative QP solver via package extension)
+- **v0.6.0** (current): Trust region globalization variant
+
+## Trust Region Globalization (Phase 6)
+
+Alternative to line search. Enabled via `SQPOptions(globalization=:trust_region)`.
+
+Constrains the QP step to `||d||∞ ≤ Δ` and uses reduction ratio to accept/reject steps
+and adjust the radius. More conservative than line search but can be more robust for
+ill-conditioned problems. Line search remains the default.
+
+```julia
+result = sqp_solve(f, g, h, x0; options=SQPOptions(
+    globalization=:trust_region,
+    trust_region_init=1.0,    # initial Δ
+    trust_region_max=1e4,     # max Δ
+    trust_region_eta=0.1,     # acceptance threshold
+))
+```
 
 ## Clarabel Extension (Phase 5)
 

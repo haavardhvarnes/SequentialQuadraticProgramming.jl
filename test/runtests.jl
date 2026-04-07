@@ -34,3 +34,4 @@ end
 
 include("test_moi.jl")
 include("test_clarabel.jl")
+include("test_trust_region.jl")

@@ -101,9 +101,13 @@ function sqp_solve(
     rho_s = T(1.2)
     delta = zero(T)
     A = zeros(T, 0, 0)
+    trust_radius = options.trust_region_init
+    use_trust_region = options.globalization == :trust_region
 
     if options.verbose
-        println("Iter\t\tobjective\tnorm_dx\t\tstep\t\tc_viol")
+        header = use_trust_region ? "Iter\t\tobjective\tnorm_dx\t\tΔ\t\tc_viol" :
+                                    "Iter\t\tobjective\tnorm_dx\t\tstep\t\tc_viol"
+        println(header)
     end
 
     for i in 1:options.max_iterations
@@ -116,8 +120,8 @@ function sqp_solve(
             end
         end
 
-        # Update rho_k (Schittkowski eq 10)
-        if i > 1 && (n_eq > 0 || n_ineq > 0)
+        # Update rho_k (Schittkowski eq 10) — only for line search
+        if !use_trust_region && i > 1 && (n_eq > 0 || n_ineq > 0)
             dxHdx = dot(ws.dx, ws.H * ws.dx)
             if abs(dxHdx) > eps(T) && abs(1 - delta) > eps(T)
                 rho_k = max(rho_0, rho_s * (dot(ws.dx, A' * ws.u))^2 / ((1 - delta)^2 * dxHdx))
@@ -127,15 +131,26 @@ function sqp_solve(
         # Solve QP subproblem
         H_dense = Matrix{Float64}(ws.H)
         qp_success = true
-        try
-            ws.dx, ws.u, delta, A = solve_qp(qp_solver, H_dense, g, h, df, dg, dh, ws.x)
-        catch
+
+        if use_trust_region
             try
-                ws.dx, ws.u, delta, A = solve_qp_with_slack(
-                    qp_solver, H_dense, g, h, df, dg, dh, ws.x, ws.u, rho_k)
+                ws.dx, ws.u, delta, A = solve_qp_trust_region(
+                    qp_solver, H_dense, g, h, df, dg, dh, ws.x, trust_radius)
             catch e
-                @warn "QP subproblem failed" exception=e
+                @warn "Trust region QP failed" exception=e
                 qp_success = false
+            end
+        else
+            try
+                ws.dx, ws.u, delta, A = solve_qp(qp_solver, H_dense, g, h, df, dg, dh, ws.x)
+            catch
+                try
+                    ws.dx, ws.u, delta, A = solve_qp_with_slack(
+                        qp_solver, H_dense, g, h, df, dg, dh, ws.x, ws.u, rho_k)
+                catch e
+                    @warn "QP subproblem failed" exception=e
+                    qp_success = false
+                end
             end
         end
 
@@ -157,101 +172,151 @@ function sqp_solve(
                               T(2) * (n_ineq + n_eq) .* (ws.u .- v_i) / denom))
         end
 
-        # Line search
-        lookback = options.phi0_lookback
-        start_idx = max(1, length(ws.phi_history) - min(i, lookback))
-        phi0max = maximum(ws.phi_history[start_idx:end])
+        # === Globalization: line search or trust region ===
+        alpha = one(T)
+        ls_comment = ""
+        step_accepted = true
 
-        alpha, phi_val, ls_comment = schittkowski_line_search(
-            merit_phi, dphi, phi0max, one(T);
-            mu = options.line_search_mu, beta = options.line_search_beta)
+        if use_trust_region
+            # Trust region: accept step if merit function decreases
+            merit_current = merit_phi(zero(T))
+            merit_trial = merit_phi(one(T))  # full step along dx
+            actual_reduction = merit_current - merit_trial
+            dx_norm = norm(ws.dx, Inf)
 
-        ws.pensig .+= alpha .* (ws.sigma .- ws.pensig)
-        ws.penlam .+= alpha .* (ws.lambda .- ws.penlam)
-        push!(ws.phi_history, min(phi_val, phi0max))
+            # Predicted reduction from QP model: -(df'dx + 0.5 dx'H dx)
+            predicted_reduction = -(dot(df(ws.x), ws.dx) + T(0.5) * dot(ws.dx, ws.H * ws.dx))
+            predicted_reduction = max(predicted_reduction, eps(T))  # safeguard
 
-        if isnan(alpha) || isinf(alpha)
-            @warn "Line search failed" alpha
-            return SQPResult(ws.x, ws.f_last, i, false, constraint_violation_last, :line_search_failed)
+            rho_tr = actual_reduction / predicted_reduction
+
+            # Update trust radius
+            trust_radius = update_trust_radius(trust_radius, rho_tr, dx_norm, options.trust_region_max)
+
+            if actual_reduction > zero(T) || rho_tr > options.trust_region_eta
+                # Accept step
+                ws.p = ws.dx
+                ws.pensig .= ws.sigma
+                ws.penlam .= ws.lambda
+                ls_comment = string("ρ=", round(rho_tr, digits = 3), " Δ=", round(trust_radius, digits = 3))
+            else
+                # Reject step — shrink radius, don't update x
+                step_accepted = false
+                ls_comment = string("rejected Δ=", round(trust_radius, digits = 3))
+                if trust_radius < options.xtol
+                    if options.verbose
+                        @info "Trust region radius too small"
+                    end
+                    return SQPResult(ws.x, ws.f_last, i, false, constraint_violation_last, :trust_region_failed)
+                end
+            end
+        else
+            # Line search
+            lookback = options.phi0_lookback
+            start_idx = max(1, length(ws.phi_history) - min(i, lookback))
+            phi0max = maximum(ws.phi_history[start_idx:end])
+
+            alpha, phi_val, ls_comment = schittkowski_line_search(
+                merit_phi, dphi, phi0max, one(T);
+                mu = options.line_search_mu, beta = options.line_search_beta)
+
+            ws.pensig .+= alpha .* (ws.sigma .- ws.pensig)
+            ws.penlam .+= alpha .* (ws.lambda .- ws.penlam)
+            push!(ws.phi_history, min(phi_val, phi0max))
+
+            if isnan(alpha) || isinf(alpha)
+                @warn "Line search failed" alpha
+                return SQPResult(ws.x, ws.f_last, i, false, constraint_violation_last, :line_search_failed)
+            end
+
+            ws.p = alpha * ws.dx
         end
 
-        # Update step
-        ws.p = alpha * ws.dx
-        ws.x .+= ws.p
-        f_new = f(ws.x)
-        constraint_violation = norm([max.(g(ws.x), zero(T)); abs.(h(ws.x))], Inf)
+        if step_accepted
+            # Update x
+            ws.x .+= ws.p
+            f_new = f(ws.x)
+            constraint_violation = norm([max.(g(ws.x), zero(T)); abs.(h(ws.x))], Inf)
 
-        # Check convergence
-        if (norm(ws.p, Inf) <= options.xtol || abs(f_new - ws.f_last) < options.ftol) &&
-           constraint_violation < min(options.xtol, options.constraint_tol)
+            # Check convergence
+            if (norm(ws.p, Inf) <= options.xtol || abs(f_new - ws.f_last) < options.ftol) &&
+               constraint_violation < min(options.xtol, options.constraint_tol)
+                if options.verbose
+                    step_info = use_trust_region ? round(trust_radius, digits = 5) : round(alpha, digits = 5)
+                    println(i, "\t\t", round(f_new, digits = 4), "\t\t",
+                            round(dot(ws.dx, ws.dx), digits = 4), "\t\t",
+                            step_info, "\t\t",
+                            round(constraint_violation, digits = 5), "\t", ls_comment)
+                    @info "SQP converged"
+                end
+                return SQPResult(ws.x, f_new, i, true, constraint_violation, :converged)
+            end
+
+            # Hessian update — store (s, y) for L-BFGS history
+            use_bfgs = false
+
+            if has_external_hessian
+                Had_new = try
+                    hess_lag(ws.x, ws.sigma, ws.lambda)
+                catch
+                    use_bfgs = true
+                    nothing
+                end
+            else
+                Had_new = try
+                    d2l(ws.x)
+                catch
+                    use_bfgs = true
+                    nothing
+                end
+            end
+
+            if !use_bfgs && isposdef(Had_new)
+                ws.H .= Matrix{T}(Had_new)
+                ws.k_reset = i
+            else
+                use_bfgs = true
+                if has_external_hessian
+                    grad_new = df(ws.x)
+                    grad_old = df(ws.x .- ws.p)
+                    q = grad_new .- grad_old
+                else
+                    q = dl(ws.x) .- dl(ws.x .- ws.p)
+                end
+                ws.H, ws.k_reset = update_hessian!(ws.H, ws.p, q, i, ws.k_reset)
+            end
+
+            # Store L-BFGS history
+            push!(ws.s_history, copy(ws.p))
+            if has_external_hessian
+                push!(ws.y_history, df(ws.x) .- df(ws.x .- ws.p))
+            else
+                push!(ws.y_history, dl(ws.x) .- dl(ws.x .- ws.p))
+            end
+            while length(ws.s_history) > ws.lbfgs_memory
+                popfirst!(ws.s_history)
+                popfirst!(ws.y_history)
+            end
+
+            constraint_violation_last = constraint_violation
+            ws.f_last = f_new
+
             if options.verbose
+                step_info = use_trust_region ? round(trust_radius, digits = 5) : round(alpha, digits = 5)
                 println(i, "\t\t", round(f_new, digits = 4), "\t\t",
                         round(dot(ws.dx, ws.dx), digits = 4), "\t\t",
-                        round(alpha, digits = 5), "\t\t",
-                        round(constraint_violation, digits = 5), "\t", ls_comment)
-                @info "SQP converged"
-            end
-            return SQPResult(ws.x, f_new, i, true, constraint_violation, :converged)
-        end
-
-        # Hessian update — store (s, y) for L-BFGS history
-        use_bfgs = false
-
-        if has_external_hessian
-            # Use provided Hessian of Lagrangian
-            Had_new = try
-                hess_lag(ws.x, ws.sigma, ws.lambda)
-            catch
-                use_bfgs = true
-                nothing
+                        step_info, "\t\t",
+                        round(constraint_violation, digits = 5),
+                        use_bfgs ? "\tBFGS" : "", "\t", ls_comment)
             end
         else
-            Had_new = try
-                d2l(ws.x)
-            catch
-                use_bfgs = true
-                nothing
+            # Step rejected (trust region) — only print
+            if options.verbose
+                println(i, "\t\t", round(ws.f_last, digits = 4), "\t\t",
+                        round(dot(ws.dx, ws.dx), digits = 4), "\t\t",
+                        round(trust_radius, digits = 5), "\t\t",
+                        round(constraint_violation_last, digits = 5), "\t", ls_comment)
             end
-        end
-
-        if !use_bfgs && isposdef(Had_new)
-            ws.H .= Matrix{T}(Had_new)
-            ws.k_reset = i
-        else
-            use_bfgs = true
-            if has_external_hessian
-                # Use gradient of objective + constraint Jacobians for gradient difference
-                grad_new = df(ws.x)
-                grad_old = df(ws.x .- ws.p)
-                q = grad_new .- grad_old
-            else
-                q = dl(ws.x) .- dl(ws.x .- ws.p)
-            end
-            ws.H, ws.k_reset = update_hessian!(ws.H, ws.p, q, i, ws.k_reset)
-        end
-
-        # Store L-BFGS history
-        push!(ws.s_history, copy(ws.p))
-        if has_external_hessian
-            push!(ws.y_history, df(ws.x) .- df(ws.x .- ws.p))
-        else
-            push!(ws.y_history, dl(ws.x) .- dl(ws.x .- ws.p))
-        end
-        # Keep only the last lbfgs_memory pairs
-        while length(ws.s_history) > ws.lbfgs_memory
-            popfirst!(ws.s_history)
-            popfirst!(ws.y_history)
-        end
-
-        constraint_violation_last = constraint_violation
-        ws.f_last = f_new
-
-        if options.verbose
-            println(i, "\t\t", round(f_new, digits = 4), "\t\t",
-                    round(dot(ws.dx, ws.dx), digits = 4), "\t\t",
-                    round(alpha, digits = 5), "\t\t",
-                    round(constraint_violation, digits = 5),
-                    use_bfgs ? "\tBFGS" : "", "\t", ls_comment)
         end
     end
 

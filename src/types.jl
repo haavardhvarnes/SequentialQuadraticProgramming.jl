@@ -13,6 +13,11 @@ struct SQPOptions{T <: AbstractFloat}
     line_search_beta::T
     phi0_lookback::Int
     qp_max_iter::Int
+    # Trust region options
+    globalization::Symbol       # :line_search or :trust_region
+    trust_region_init::T        # initial trust region radius
+    trust_region_max::T         # maximum radius
+    trust_region_eta::T         # step acceptance threshold
 end
 
 function SQPOptions{T}(;
@@ -25,9 +30,14 @@ function SQPOptions{T}(;
     line_search_beta::T = T(0.5),
     phi0_lookback::Int = 5,
     qp_max_iter::Int = 2500,
+    globalization::Symbol = :line_search,
+    trust_region_init::T = T(1.0),
+    trust_region_max::T = T(1e4),
+    trust_region_eta::T = T(0.1),
 ) where {T <: AbstractFloat}
     SQPOptions{T}(max_iterations, xtol, ftol, constraint_tol, verbose,
-                  line_search_mu, line_search_beta, phi0_lookback, qp_max_iter)
+                  line_search_mu, line_search_beta, phi0_lookback, qp_max_iter,
+                  globalization, trust_region_init, trust_region_max, trust_region_eta)
 end
 
 SQPOptions(; kwargs...) = SQPOptions{Float64}(; kwargs...)
