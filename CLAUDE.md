@@ -102,7 +102,8 @@ Default: auto-selects `AutoForwardDiff()`, falls back to `AutoFiniteDiff()` if F
 - **v0.3.0**: Exact MOI evaluator derivatives, L-BFGS fallback, optional derivative kwargs
 - **v0.4.0** (current): DifferentiationInterface.jl pluggable AD backends
 - **v0.5.0**: Clarabel extension (alternative QP solver via package extension)
-- **v0.6.0** (current): Trust region globalization variant
+- **v0.6.0**: Trust region globalization variant
+- **v0.7.0** (current): HiGHS extension (alternative QP solver via package extension)
 
 ## Trust Region Globalization (Phase 6)
 

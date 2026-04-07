@@ -28,4 +28,8 @@ export Optimizer
 global ClarabelQPSolver::Any = nothing
 export ClarabelQPSolver
 
+# Placeholder for HiGHS extension — set by SequentialQuadraticProgrammingHiGHSExt.__init__
+global HiGHSQPSolver::Any = nothing
+export HiGHSQPSolver
+
 end # module

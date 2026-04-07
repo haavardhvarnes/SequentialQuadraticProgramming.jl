@@ -1,7 +1,7 @@
 name = "SequentialQuadraticProgramming"
 uuid = "f5a3b3a0-7e4a-4e6b-8f3a-1c2d3e4f5a6b"
 authors = ["Havard Hvarnes"]
-version = "0.6.0"
+version = "0.7.0"
 
 [deps]
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
@@ -14,10 +14,12 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 
 [weakdeps]
 Clarabel = "61c947e1-3e6d-4ee4-985a-eec8c727bd6e"
+HiGHS = "87dc4568-4c63-4d18-b0c0-bb2238e4078b"
 MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
 
 [extensions]
 SequentialQuadraticProgrammingClarabelExt = "Clarabel"
+SequentialQuadraticProgrammingHiGHSExt = "HiGHS"
 SequentialQuadraticProgrammingMOIExt = "MathOptInterface"
 
 [compat]
@@ -27,14 +29,16 @@ Clarabel = "0.9, 0.10, 0.11"
 DifferentiationInterface = "0.6, 0.7"
 FiniteDiff = "2"
 ForwardDiff = "0.10"
+HiGHS = "1.9"
 MathOptInterface = "1"
 julia = "1.10"
 
 [extras]
 Clarabel = "61c947e1-3e6d-4ee4-985a-eec8c727bd6e"
+HiGHS = "87dc4568-4c63-4d18-b0c0-bb2238e4078b"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
 MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
 
 [targets]
-test = ["Test", "JuMP", "MathOptInterface", "Clarabel"]
+test = ["Test", "JuMP", "MathOptInterface", "Clarabel", "HiGHS"]
