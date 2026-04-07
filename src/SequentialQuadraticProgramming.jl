@@ -23,4 +23,8 @@ export sqp_solve, SQPOptions, SQPResult, NLPProblem, COSMOQPSolver
 global Optimizer::Any = nothing
 export Optimizer
 
+# Placeholder for Clarabel extension — set by SequentialQuadraticProgrammingClarabelExt.__init__
+global ClarabelQPSolver::Any = nothing
+export ClarabelQPSolver
+
 end # module

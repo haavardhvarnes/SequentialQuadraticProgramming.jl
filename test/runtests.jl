@@ -33,3 +33,4 @@ include("problems/hock_schittkowski.jl")
 end
 
 include("test_moi.jl")
+include("test_clarabel.jl")

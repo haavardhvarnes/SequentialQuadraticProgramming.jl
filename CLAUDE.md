@@ -101,5 +101,14 @@ Default: auto-selects `AutoForwardDiff()`, falls back to `AutoFiniteDiff()` if F
 - **v0.2.0**: MathOptInterface extension for JuMP integration
 - **v0.3.0**: Exact MOI evaluator derivatives, L-BFGS fallback, optional derivative kwargs
 - **v0.4.0** (current): DifferentiationInterface.jl pluggable AD backends
-- **v0.5.0**: Clarabel extension (alternative QP solver)
+- **v0.5.0** (current): Clarabel extension (alternative QP solver via package extension)
 - **v0.6.0**: Trust region globalization variant
+
+## Clarabel Extension (Phase 5)
+
+Package extension in `ext/SequentialQuadraticProgrammingClarabelExt/`. Activated by `using Clarabel`.
+Provides `ClarabelQPSolver <: AbstractQPSolver` as alternative to the default `COSMOQPSolver`.
+Converts COSMO Box constraints to Clarabel's conic form (NonnegativeCone).
+
+Note: COSMO is faster on typical SQP QP subproblems (Box constraints are native). Clarabel is
+useful when COSMO is unavailable or for problems that benefit from Clarabel's interior point method.
