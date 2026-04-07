@@ -99,3 +99,49 @@ function update_hessian!(H::AbstractMatrix{T}, s::AbstractVector{T}, y::Abstract
     end
     return H, k_reset
 end
+
+"""
+    lbfgs_hessian(s_history, y_history, n)
+
+Reconstruct an approximate Hessian from L-BFGS history using the compact
+representation. Returns a dense positive definite matrix.
+
+Uses the two-loop recursion approach to build H₀ scaled by γ = (sᵀy)/(yᵀy)
+from the most recent pair, then applies all stored corrections.
+"""
+function lbfgs_hessian(s_history::Vector{V}, y_history::Vector{V},
+                       n::Int) where {T <: AbstractFloat, V <: AbstractVector{T}}
+    m = length(s_history)
+    if m == 0
+        return Matrix{T}(I, n, n)
+    end
+
+    # Initial scaling: γ = sₘᵀyₘ / yₘᵀyₘ (Nocedal & Wright)
+    s_last = s_history[end]
+    y_last = y_history[end]
+    yy = dot(y_last, y_last)
+    gamma = yy > eps(T) ? dot(s_last, y_last) / yy : one(T)
+    gamma = max(gamma, T(1e-8))  # ensure positive
+
+    # Build H = γI then apply BFGS updates from history
+    H = gamma * Matrix{T}(I, n, n)
+    for k in 1:m
+        s = s_history[k]
+        y = y_history[k]
+        sy = dot(s, y)
+        if sy > eps(T)
+            Hs = H * s
+            sHs = dot(s, Hs)
+            if sHs > eps(T)
+                H .= H .+ (y * y') / sy .- (Hs * Hs') / sHs
+            end
+        end
+    end
+
+    # Ensure positive definite
+    if !isposdef(H)
+        H .= gamma * Matrix{T}(I, n, n)
+    end
+
+    return H
+end

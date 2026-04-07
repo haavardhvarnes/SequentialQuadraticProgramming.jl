@@ -65,9 +65,14 @@ mutable struct SQPWorkspace{T <: AbstractFloat, M <: AbstractMatrix{T}, V <: Abs
     phi_history::Vector{T}
     k_reset::Int
     f_last::T
+    # L-BFGS history
+    s_history::Vector{V}
+    y_history::Vector{V}
+    lbfgs_memory::Int
 end
 
-function SQPWorkspace(x0::AbstractVector{T}, n_ineq::Int, n_eq::Int) where {T <: AbstractFloat}
+function SQPWorkspace(x0::AbstractVector{T}, n_ineq::Int, n_eq::Int;
+                      lbfgs_memory::Int = 10) where {T <: AbstractFloat}
     n = length(x0)
     SQPWorkspace{T, Matrix{T}, Vector{T}}(
         copy(x0),
@@ -83,6 +88,9 @@ function SQPWorkspace(x0::AbstractVector{T}, n_ineq::Int, n_eq::Int) where {T <:
         T[],
         0,
         zero(T),
+        Vector{T}[],
+        Vector{T}[],
+        lbfgs_memory,
     )
 end
 

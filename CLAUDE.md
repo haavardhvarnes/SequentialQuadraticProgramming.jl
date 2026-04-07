@@ -74,8 +74,17 @@ Located in `ext/SequentialQuadraticProgrammingMOIExt/`. Activated when `MathOptI
 - Status mapping: `:converged` → `LOCALLY_SOLVED`, `:max_iterations` → `ITERATION_LIMIT`
 - Usage: `Model(SequentialQuadraticProgramming.Optimizer)`
 
+## Solver accepts optional derivative functions (Phase 3)
+
+`sqp_solve` accepts keyword arguments `grad_f`, `jac_g`, `jac_h`, `hess_lag` to provide pre-computed derivatives. When provided, ForwardDiff/FiniteDiff are bypassed entirely. The MOI wrapper uses this to pass exact derivatives from the JuMP evaluator (reverse-mode AD).
+
+## L-BFGS fallback (Phase 3)
+
+When the analytical Hessian is not positive definite, the solver tries L-BFGS reconstruction from stored (s, y) history pairs before falling back to identity. This preserves curvature information across iterations.
+
 ## Phase Roadmap
 
 - **v0.1.0**: Core solver, functional API, COSMO QP, ForwardDiff, test suite
-- **v0.2.0** (current): MathOptInterface extension for JuMP integration
-- **v0.3.0+**: DifferentiationInterface.jl pluggable backends, L-BFGS fallback when Hessian not PD, Clarabel extension, sparse Jacobian/Hessian, trust region, Documenter.jl
+- **v0.2.0**: MathOptInterface extension for JuMP integration
+- **v0.3.0** (current): Exact MOI evaluator derivatives, L-BFGS fallback, optional derivative kwargs
+- **v0.4.0+**: DifferentiationInterface.jl pluggable backends, Clarabel extension, sparse Jacobian/Hessian, trust region, Documenter.jl

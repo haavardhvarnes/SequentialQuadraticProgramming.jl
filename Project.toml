@@ -1,7 +1,7 @@
 name = "SequentialQuadraticProgramming"
 uuid = "f5a3b3a0-7e4a-4e6b-8f3a-1c2d3e4f5a6b"
 authors = ["Havard Hvarnes"]
-version = "0.2.0"
+version = "0.3.0"
 
 [deps]
 COSMO = "1e616198-aa4e-51ec-90a2-23f7fbd31d8d"

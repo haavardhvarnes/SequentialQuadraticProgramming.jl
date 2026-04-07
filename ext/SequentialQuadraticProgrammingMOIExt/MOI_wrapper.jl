@@ -292,15 +292,21 @@ function MOI.optimize!(model::Optimizer)
     evaluator = model.nlp_data.evaluator
     has_nlp_obj = model.nlp_data.has_objective
 
-    # Initialize NLP evaluator
-    features = Symbol[]
-    if has_nlp_obj
-        push!(features, :Grad)
-    end
+    # Initialize NLP evaluator with all available features
     nlp_bounds = model.nlp_data.constraint_bounds
     n_nlp_constraints = length(nlp_bounds)
-    if n_nlp_constraints > 0
+
+    available = !(evaluator isa EmptyNLPEvaluator) ? MOI.features_available(evaluator) : Symbol[]
+    features = Symbol[]
+    if has_nlp_obj && :Grad in available
+        push!(features, :Grad)
+    end
+    if n_nlp_constraints > 0 && :Jac in available
         push!(features, :Jac)
+    end
+    has_hess = :Hess in available
+    if has_hess
+        push!(features, :Hess)
     end
     if !isempty(features)
         MOI.initialize(evaluator, features)
@@ -406,12 +412,155 @@ function MOI.optimize!(model::Optimizer)
         verbose = !model.silent,
     )
 
+    # Build exact derivative functions from MOI evaluator (bypasses FiniteDiff)
+    _grad_f = nothing
+    if has_nlp_obj && :Grad in features
+        _grad_buf = zeros(Float64, n)
+        _grad_f = function (x)
+            MOI.eval_objective_gradient(evaluator, _grad_buf, Float64.(x))
+            return sign * copy(_grad_buf)
+        end
+    end
+
+    _jac_g = nothing
+    _jac_h = nothing
+    if n_nlp_constraints > 0 && :Jac in features
+        jac_struct = MOI.jacobian_structure(evaluator)
+        jac_vals = zeros(Float64, length(jac_struct))
+
+        # Build a function that returns the full Jacobian of g (inequalities)
+        # and h (equalities) separately, accounting for linear constraints too
+        n_lin_le = length(model.linear_le_constraints)
+        n_lin_ge = length(model.linear_ge_constraints)
+        n_lin_eq = length(model.linear_eq_constraints)
+        n_nlp_ineq = length(nlp_ineq_indices) + length(nlp_ineq_ge_indices)
+        n_nlp_eq = length(nlp_eq_indices)
+        n_total_ineq = n_lin_le + n_lin_ge + n_nlp_ineq
+        n_total_eq = n_lin_eq + n_nlp_eq
+
+        # Note: when bounds are present, NLPProblem wraps g as
+        # g_wrapped(x) = vcat(g_orig(x), lb .- x, x .- ub)
+        # So the Jacobian must include [-I; I] rows for bounds.
+        has_var_bounds = any(isfinite, lb) || any(isfinite, ub)
+        n_bound_rows = has_var_bounds ? 2 * n : 0
+        n_total_ineq_with_bounds = n_total_ineq + n_bound_rows
+
+        _jac_g = function (x)
+            J = zeros(Float64, n_total_ineq_with_bounds, n)
+            row = 0
+            # Linear LE Jacobian
+            for info in model.linear_le_constraints
+                row += 1
+                for term in info.func.terms
+                    J[row, term.variable.value] += term.coefficient
+                end
+            end
+            # Linear GE Jacobian (negated)
+            for info in model.linear_ge_constraints
+                row += 1
+                for term in info.func.terms
+                    J[row, term.variable.value] -= term.coefficient
+                end
+            end
+            # NLP constraint Jacobian
+            if n_nlp_constraints > 0
+                MOI.eval_constraint_jacobian(evaluator, jac_vals, Float64.(x))
+                Jnlp = zeros(Float64, n_nlp_constraints, n)
+                for (k, (i, j)) in enumerate(jac_struct)
+                    Jnlp[i, j] += jac_vals[k]
+                end
+                for (_, idx) in enumerate(nlp_ineq_indices)
+                    row += 1
+                    J[row, :] .= Jnlp[idx, :]
+                end
+                for (_, idx) in enumerate(nlp_ineq_ge_indices)
+                    row += 1
+                    J[row, :] .= -Jnlp[idx, :]
+                end
+            end
+            # Bounds: lb - x <= 0  →  Jacobian = -I
+            #         x - ub <= 0  →  Jacobian = +I
+            if has_var_bounds
+                for j in 1:n
+                    J[row + j, j] = -1.0       # d(lb - x)/dx = -I
+                    J[row + n + j, j] = 1.0     # d(x - ub)/dx = +I
+                end
+            end
+            return J
+        end
+
+        _jac_h = function (x)
+            J = zeros(Float64, n_total_eq, n)
+            row = 0
+            # Linear EQ Jacobian
+            for info in model.linear_eq_constraints
+                row += 1
+                for term in info.func.terms
+                    J[row, term.variable.value] += term.coefficient
+                end
+            end
+            # NLP EQ Jacobian
+            if !isempty(nlp_eq_indices)
+                MOI.eval_constraint_jacobian(evaluator, jac_vals, Float64.(x))
+                Jnlp = zeros(Float64, n_nlp_constraints, n)
+                for (k, (i, j)) in enumerate(jac_struct)
+                    Jnlp[i, j] += jac_vals[k]
+                end
+                for (_, idx) in enumerate(nlp_eq_indices)
+                    row += 1
+                    J[row, :] .= Jnlp[idx, :]
+                end
+            end
+            return J
+        end
+    end
+
+    # Build Hessian of Lagrangian from evaluator
+    _hess_lag = nothing
+    if has_hess && n_nlp_constraints > 0
+        hess_struct = MOI.hessian_lagrangian_structure(evaluator)
+        hess_vals = zeros(Float64, length(hess_struct))
+
+        _hess_lag = function (x, sigma_mult, lambda_mult)
+            # Build full mu vector for MOI (all NLP constraints, in original order)
+            mu = zeros(Float64, n_nlp_constraints)
+            # Map our inequality/equality multipliers back to NLP constraint indices
+            # sigma_mult corresponds to g constraints: [lin_le; lin_ge; nlp_ineq; nlp_ge]
+            # We need to map nlp_ineq and nlp_ge multipliers back to NLP constraint order
+            n_lin = length(model.linear_le_constraints) + length(model.linear_ge_constraints)
+            for (j, idx) in enumerate(nlp_ineq_indices)
+                mu[idx] += sigma_mult[n_lin + j]  # LE: c - upper <= 0
+            end
+            for (j, idx) in enumerate(nlp_ineq_ge_indices)
+                mu[idx] -= sigma_mult[n_lin + length(nlp_ineq_indices) + j]  # GE: lower - c <= 0, so -mu
+            end
+            n_lin_eq_count = length(model.linear_eq_constraints)
+            for (j, idx) in enumerate(nlp_eq_indices)
+                mu[idx] += lambda_mult[n_lin_eq_count + j]
+            end
+
+            MOI.eval_hessian_lagrangian(evaluator, hess_vals, Float64.(x), sign, mu)
+            H = zeros(Float64, n, n)
+            for (k, (i, j)) in enumerate(hess_struct)
+                H[i, j] += hess_vals[k]
+                if i != j
+                    H[j, i] += hess_vals[k]
+                end
+            end
+            return H
+        end
+    end
+
     # Solve
     has_bounds = any(isfinite, lb) || any(isfinite, ub)
     result = if has_bounds
-        SQP.sqp_solve(f, g, h, x0, lb, ub; options = opts)
+        SQP.sqp_solve(f, g, h, x0, lb, ub; options = opts,
+                      grad_f = _grad_f, jac_g = _jac_g, jac_h = _jac_h,
+                      hess_lag = _hess_lag)
     else
-        SQP.sqp_solve(f, g, h, x0; options = opts)
+        SQP.sqp_solve(f, g, h, x0; options = opts,
+                      grad_f = _grad_f, jac_g = _jac_g, jac_h = _jac_h,
+                      hess_lag = _hess_lag)
     end
 
     # Store results
