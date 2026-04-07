@@ -64,8 +64,18 @@ Follow the SciML Style Guide:
 
 Private registry at `https://github.com/haavardhvarnes/JuliaRegistry`. Use `LocalRegistry.jl` to register new versions.
 
+## MOI Extension (Phase 2)
+
+Located in `ext/SequentialQuadraticProgrammingMOIExt/`. Activated when `MathOptInterface` (or `JuMP`) is loaded.
+
+- `Optimizer <: MOI.AbstractOptimizer` — JuMP-compatible solver
+- Supports: NLPBlock, variable bounds, linear LE/GE/EQ constraints, MAX_SENSE
+- NLP evaluator callbacks use `Float64.(x)` to prevent ForwardDiff Dual propagation (MOI evaluators don't support AD). Derivatives computed via FiniteDiff fallback.
+- Status mapping: `:converged` → `LOCALLY_SOLVED`, `:max_iterations` → `ITERATION_LIMIT`
+- Usage: `Model(SequentialQuadraticProgramming.Optimizer)`
+
 ## Phase Roadmap
 
-- **v0.1.0** (current): Core solver, functional API, COSMO QP, ForwardDiff, test suite
-- **v0.2.0**: MathOptInterface extension for JuMP integration
-- **v0.3.0+**: ADTypes.jl pluggable backends, Clarabel extension, sparse Jacobian/Hessian, L-BFGS, trust region, Documenter.jl
+- **v0.1.0**: Core solver, functional API, COSMO QP, ForwardDiff, test suite
+- **v0.2.0** (current): MathOptInterface extension for JuMP integration
+- **v0.3.0+**: DifferentiationInterface.jl pluggable backends, L-BFGS fallback when Hessian not PD, Clarabel extension, sparse Jacobian/Hessian, trust region, Documenter.jl

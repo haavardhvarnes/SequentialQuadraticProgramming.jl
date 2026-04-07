@@ -17,4 +17,8 @@ include("solver.jl")
 
 export sqp_solve, SQPOptions, SQPResult, NLPProblem, COSMOQPSolver
 
+# Placeholder for MOI extension — set by SequentialQuadraticProgrammingMOIExt.__init__
+global Optimizer::Any = nothing
+export Optimizer
+
 end # module

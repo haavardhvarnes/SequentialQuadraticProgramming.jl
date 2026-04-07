@@ -31,3 +31,5 @@ include("problems/hock_schittkowski.jl")
         @testset "HS105" begin test_hs105() end
     end
 end
+
+include("test_moi.jl")
