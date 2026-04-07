@@ -82,9 +82,24 @@ Located in `ext/SequentialQuadraticProgrammingMOIExt/`. Activated when `MathOptI
 
 When the analytical Hessian is not positive definite, the solver tries L-BFGS reconstruction from stored (s, y) history pairs before falling back to identity. This preserves curvature information across iterations.
 
+## DifferentiationInterface.jl (Phase 4)
+
+`src/derivatives.jl` uses DifferentiationInterface.jl (DI) with `prepare_*` caching for zero-overhead repeated differentiation. Users can pass any ADTypes.jl backend via `ad_backend` kwarg:
+
+```julia
+using ADTypes
+result = sqp_solve(f, g, h, x0; ad_backend=AutoForwardDiff())  # explicit
+result = sqp_solve(f, g, h, x0; ad_backend=AutoFiniteDiff())   # finite diff
+result = sqp_solve(f, g, h, x0)                                # auto-select
+```
+
+Default: auto-selects `AutoForwardDiff()`, falls back to `AutoFiniteDiff()` if ForwardDiff fails (e.g., functions with FFI calls).
+
 ## Phase Roadmap
 
 - **v0.1.0**: Core solver, functional API, COSMO QP, ForwardDiff, test suite
 - **v0.2.0**: MathOptInterface extension for JuMP integration
-- **v0.3.0** (current): Exact MOI evaluator derivatives, L-BFGS fallback, optional derivative kwargs
-- **v0.4.0+**: DifferentiationInterface.jl pluggable backends, Clarabel extension, sparse Jacobian/Hessian, trust region, Documenter.jl
+- **v0.3.0**: Exact MOI evaluator derivatives, L-BFGS fallback, optional derivative kwargs
+- **v0.4.0** (current): DifferentiationInterface.jl pluggable AD backends
+- **v0.5.0**: Clarabel extension (alternative QP solver)
+- **v0.6.0**: Trust region globalization variant

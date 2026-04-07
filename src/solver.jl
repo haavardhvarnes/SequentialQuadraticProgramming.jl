@@ -17,6 +17,7 @@ function sqp_solve(
     problem::NLPProblem{T};
     options::SQPOptions{T} = SQPOptions{T}(),
     qp_solver::AbstractQPSolver = COSMOQPSolver(),
+    ad_backend = nothing,
     grad_f = nothing,
     jac_g = nothing,
     jac_h = nothing,
@@ -28,10 +29,10 @@ function sqp_solve(
         @info "SQP solver" iterations=options.max_iterations xtol=options.xtol ftol=options.ftol
     end
 
-    # Build derivative functions (use provided or auto-diff)
-    df = grad_f !== nothing ? grad_f : make_gradient(f, x0)
-    dg = jac_g !== nothing ? jac_g : make_jacobian(g, x0)
-    dh = jac_h !== nothing ? jac_h : make_jacobian(h, x0)
+    # Build derivative functions (use provided, or DI with specified/auto backend)
+    df = grad_f !== nothing ? grad_f : make_gradient(f, x0; backend = ad_backend)
+    dg = jac_g !== nothing ? jac_g : make_jacobian(g, x0; backend = ad_backend)
+    dh = jac_h !== nothing ? jac_h : make_jacobian(h, x0; backend = ad_backend)
 
     # Build Lagrangian and its derivatives
     ws = SQPWorkspace(x0, n_ineq, n_eq)
@@ -51,8 +52,8 @@ function sqp_solve(
         else
             f(x)
         end
-        dl = make_gradient(lagrangian, x0)
-        d2l = make_hessian(lagrangian, x0)
+        dl = make_gradient(lagrangian, x0; backend = ad_backend)
+        d2l = make_hessian(lagrangian, x0; backend = ad_backend)
     end
 
     # Initialize Hessian

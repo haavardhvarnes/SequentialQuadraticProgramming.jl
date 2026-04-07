@@ -1,5 +1,7 @@
 module SequentialQuadraticProgramming
 
+import DifferentiationInterface as DI
+import ADTypes
 using ForwardDiff
 using FiniteDiff
 using COSMO
