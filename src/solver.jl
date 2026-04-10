@@ -29,6 +29,18 @@ function sqp_solve(
         @info "SQP solver" iterations=options.max_iterations xtol=options.xtol ftol=options.ftol
     end
 
+    # Problem diagnostics (optional)
+    diagnostics = nothing
+    if options.diagnose
+        diagnostics = diagnose_problem(problem; ad_backend = ad_backend)
+        if options.verbose
+            @info "Problem diagnostics" nonlinearity=diagnostics.constraint_nonlinearity cond=diagnostics.jacobian_condition hessian_posdef=diagnostics.hessian_posdef feasibility=diagnostics.initial_feasibility recommended=diagnostics.recommended_strategy
+            for w in diagnostics.warnings
+                @warn w
+            end
+        end
+    end
+
     # Build derivative functions (use provided, or DI with specified/auto backend)
     df = grad_f !== nothing ? grad_f : make_gradient(f, x0; backend = ad_backend)
     dg = jac_g !== nothing ? jac_g : make_jacobian(g, x0; backend = ad_backend)
@@ -36,6 +48,7 @@ function sqp_solve(
 
     # Build Lagrangian and its derivatives
     ws = SQPWorkspace(x0, n_ineq, n_eq)
+    n_soc_steps = 0
 
     has_external_hessian = hess_lag !== nothing
 
@@ -156,7 +169,9 @@ function sqp_solve(
 
         if !qp_success || any(isnan, ws.dx)
             @warn "QP direction step failed"
-            return SQPResult(ws.x, ws.f_last, i, false, constraint_violation_last, :qp_failed)
+            return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, i, false,
+                                              constraint_violation_last, :qp_failed,
+                                              diagnostics, n_soc_steps)
         end
 
         # Update multipliers
@@ -207,7 +222,9 @@ function sqp_solve(
                     if options.verbose
                         @info "Trust region radius too small"
                     end
-                    return SQPResult(ws.x, ws.f_last, i, false, constraint_violation_last, :trust_region_failed)
+                    return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, i, false,
+                                                      constraint_violation_last, :trust_region_failed,
+                                                      diagnostics, n_soc_steps)
                 end
             end
         else
@@ -226,7 +243,9 @@ function sqp_solve(
 
             if isnan(alpha) || isinf(alpha)
                 @warn "Line search failed" alpha
-                return SQPResult(ws.x, ws.f_last, i, false, constraint_violation_last, :line_search_failed)
+                return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, i, false,
+                                                  constraint_violation_last, :line_search_failed,
+                                                  diagnostics, n_soc_steps)
             end
 
             ws.p = alpha * ws.dx
@@ -249,7 +268,9 @@ function sqp_solve(
                             round(constraint_violation, digits = 5), "\t", ls_comment)
                     @info "SQP converged"
                 end
-                return SQPResult(ws.x, f_new, i, true, constraint_violation, :converged)
+                return SQPResult{T, typeof(ws.x)}(ws.x, f_new, i, true,
+                                                  constraint_violation, :converged,
+                                                  diagnostics, n_soc_steps)
             end
 
             # Hessian update — store (s, y) for L-BFGS history
@@ -324,8 +345,9 @@ function sqp_solve(
         @info "No convergence" iterations=options.max_iterations
     end
 
-    return SQPResult(ws.x, ws.f_last, options.max_iterations, false,
-                     constraint_violation_last, :max_iterations)
+    return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, options.max_iterations, false,
+                                      constraint_violation_last, :max_iterations,
+                                      diagnostics, n_soc_steps)
 end
 
 # Convenience wrappers

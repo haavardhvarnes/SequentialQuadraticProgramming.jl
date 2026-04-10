@@ -7,10 +7,12 @@ using FiniteDiff
 using COSMO
 using LinearAlgebra
 using SparseArrays
+using Random
 
 include("types.jl")
 include("problem.jl")
 include("derivatives.jl")
+include("diagnostics.jl")
 include("merit.jl")
 include("line_search.jl")
 include("hessian_update.jl")
@@ -19,6 +21,7 @@ include("trust_region.jl")
 include("solver.jl")
 
 export sqp_solve, SQPOptions, SQPResult, NLPProblem, COSMOQPSolver
+export ProblemDiagnostics, diagnose_problem
 
 # Placeholder for MOI extension — set by SequentialQuadraticProgrammingMOIExt.__init__
 global Optimizer::Any = nothing
