@@ -55,3 +55,59 @@ function schittkowski_line_search(
 
     return alpha, phi(alpha), comment
 end
+
+"""
+    schittkowski_line_search_soc(phi, dphi, phi0max, amax;
+                                 soc_callback, mu, beta)
+
+Line search with Second-Order Correction (SOC) fallback for the Maratos effect.
+
+Computes `dphi0 = dphi(0)`. If the direction descends (`dphi0 < 0`), this
+function is equivalent to [`schittkowski_line_search`](@ref). If the merit
+function appears to go uphill (`dphi0 >= 0`, the Maratos signature), it
+invokes `soc_callback()` to obtain a corrected merit function/derivative
+pair along the SOC direction, then runs the standard line search on those.
+
+`soc_callback()` must return `(phi_soc, dphi_soc, accepted::Bool)`:
+- `phi_soc(α)` — merit function evaluated along the corrected step
+- `dphi_soc(α)` — its derivative w.r.t. `α`
+- `accepted` — `true` if the correction QP solved and produced a usable
+  direction; `false` to fall back to the legacy patched line search.
+
+Returns `(alpha, phi_alpha, comment, used_soc::Bool)`.
+"""
+function schittkowski_line_search_soc(
+    phi::Function, dphi::Function,
+    phi0max::T, amax::T = one(T);
+    soc_callback::Function,
+    mu::T = T(1e-4), beta::T = T(0.5),
+) where {T <: AbstractFloat}
+    phi0 = phi(zero(T))
+    dphi0 = try
+        dphi(zero(T))
+    catch
+        hphi = T(1e-6)
+        (phi(hphi) - phi0) / hphi
+    end
+    if isinf(dphi0) || isnan(dphi0)
+        hphi = T(1e-6)
+        dphi0 = (phi(hphi) - phi0) / hphi
+    end
+
+    # Downhill — no SOC needed, delegate to the standard line search.
+    if dphi0 < zero(T)
+        a, p, c = schittkowski_line_search(phi, dphi, phi0max, amax; mu = mu, beta = beta)
+        return a, p, c, false
+    end
+
+    # Uphill — try SOC before giving up.
+    phi_soc, dphi_soc, accepted = soc_callback()
+    if accepted
+        a, p, c = schittkowski_line_search(phi_soc, dphi_soc, phi0max, amax; mu = mu, beta = beta)
+        return a, p, "SOC: " * c, true
+    end
+
+    # SOC failed — fall back to the legacy patched behaviour.
+    a, p, c = schittkowski_line_search(phi, dphi, phi0max, amax; mu = mu, beta = beta)
+    return a, p, "SOC failed, " * c, false
+end

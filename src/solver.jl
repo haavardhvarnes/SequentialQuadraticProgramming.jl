@@ -41,6 +41,11 @@ function sqp_solve(
         end
     end
 
+    # SOC is implemented for COSMOQPSolver only in v0.8.1
+    if options.use_soc && !(qp_solver isa COSMOQPSolver)
+        @warn "Second-Order Correction (use_soc=true) is only supported with COSMOQPSolver in v0.8.x — falling back to standard line search"
+    end
+
     # Build derivative functions (use provided, or DI with specified/auto backend)
     df = grad_f !== nothing ? grad_f : make_gradient(f, x0; backend = ad_backend)
     dg = jac_g !== nothing ? jac_g : make_jacobian(g, x0; backend = ad_backend)
@@ -233,9 +238,48 @@ function sqp_solve(
             start_idx = max(1, length(ws.phi_history) - min(i, lookback))
             phi0max = maximum(ws.phi_history[start_idx:end])
 
-            alpha, phi_val, ls_comment = schittkowski_line_search(
-                merit_phi, dphi, phi0max, one(T);
-                mu = options.line_search_mu, beta = options.line_search_beta)
+            # Second-Order Correction path: only available with COSMOQPSolver
+            # (the correction QP implementation is COSMO-only in v0.8.1).
+            if options.use_soc && qp_solver isa COSMOQPSolver
+                soc_cb = function()
+                    # Evaluate true constraints at the full-step trial point
+                    x_trial = ws.x .+ ws.dx
+                    c_trial = T[g(x_trial); h(x_trial)]
+                    # Correction QP: drive the linearized residual toward zero
+                    # using the primary-point Jacobian A. Inequality rows
+                    # (first n_ineq) use one-sided bounds; equality rows use
+                    # two-sided bounds.
+                    d_c = solve_qp_correction(qp_solver, H_dense, c_trial, A, df(ws.x), n_ineq)
+                    if d_c === nothing
+                        return (merit_phi, dphi, false)
+                    end
+                    dx_soc = ws.dx .+ d_c
+
+                    # Merit function along the corrected direction
+                    phi_soc_fn(a_) = begin
+                        x_try = ws.x .+ a_ .* dx_soc
+                        pensig_try = ws.pensig .+ a_ .* (ws.sigma .- ws.pensig)
+                        penlam_try = ws.penlam .+ a_ .* (ws.lambda .- ws.penlam)
+                        augmented_lagrangian(f(x_try), g(x_try), h(x_try),
+                                             pensig_try, penlam_try, ws.r)
+                    end
+                    dphi_soc_fn(a_) = ForwardDiff.derivative(phi_soc_fn, a_)
+
+                    # Commit the corrected direction so ws.p = α·ws.dx downstream
+                    ws.dx = dx_soc
+                    return (phi_soc_fn, dphi_soc_fn, true)
+                end
+
+                alpha, phi_val, ls_comment, used_soc = schittkowski_line_search_soc(
+                    merit_phi, dphi, phi0max, one(T);
+                    soc_callback = soc_cb,
+                    mu = options.line_search_mu, beta = options.line_search_beta)
+                used_soc && (n_soc_steps += 1)
+            else
+                alpha, phi_val, ls_comment = schittkowski_line_search(
+                    merit_phi, dphi, phi0max, one(T);
+                    mu = options.line_search_mu, beta = options.line_search_beta)
+            end
 
             ws.pensig .+= alpha .* (ws.sigma .- ws.pensig)
             ws.penlam .+= alpha .* (ws.lambda .- ws.penlam)
