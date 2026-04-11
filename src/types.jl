@@ -22,6 +22,16 @@ struct SQPOptions{T <: AbstractFloat}
     diagnose::Bool              # run `diagnose_problem` at solver start
     use_soc::Bool               # enable Second-Order Correction on uphill line search
     soc_max_tries::Int          # max SOC attempts per iteration
+    # Phase 8.2: numerical safeguards (enabled by default — no-op on clean problems)
+    numerical_safeguards::Bool  # master switch for A+B+C (step clamp, BFGS skip, LM reg)
+    step_clamp_factor::T        # clamp ‖dx‖∞ to step_clamp_factor·(1 + ‖x‖∞)  (default 100.0)
+    bfgs_skip_alpha::T          # skip BFGS if α below this threshold         (default 1e-4)
+    bfgs_skip_curvature::T      # skip BFGS if s'y/‖s‖² below this             (default 1e-8)
+    lm_grow::T                  # LM damping multiplier on bad iterations     (default 10.0)
+    lm_shrink::T                # LM damping multiplier on good iterations    (default 0.5)
+    lm_max::T                   # maximum LM damping                          (default 1e6)
+    lm_min::T                   # below this, LM is turned off                (default 1e-8)
+    lm_min_active::T            # bootstrap LM value when first activated     (default 1e-4)
 end
 
 function SQPOptions{T}(;
@@ -41,11 +51,22 @@ function SQPOptions{T}(;
     diagnose::Bool = false,
     use_soc::Bool = false,
     soc_max_tries::Int = 1,
+    numerical_safeguards::Bool = true,
+    step_clamp_factor::T = T(100.0),
+    bfgs_skip_alpha::T = T(1e-3),
+    bfgs_skip_curvature::T = T(1e-8),
+    lm_grow::T = T(4.0),
+    lm_shrink::T = T(0.25),
+    lm_max::T = T(1e4),
+    lm_min::T = T(1e-8),
+    lm_min_active::T = T(1e-4),
 ) where {T <: AbstractFloat}
     SQPOptions{T}(max_iterations, xtol, ftol, constraint_tol, verbose,
                   line_search_mu, line_search_beta, phi0_lookback, qp_max_iter,
                   globalization, trust_region_init, trust_region_max, trust_region_eta,
-                  diagnose, use_soc, soc_max_tries)
+                  diagnose, use_soc, soc_max_tries,
+                  numerical_safeguards, step_clamp_factor, bfgs_skip_alpha,
+                  bfgs_skip_curvature, lm_grow, lm_shrink, lm_max, lm_min, lm_min_active)
 end
 
 SQPOptions(; kwargs...) = SQPOptions{Float64}(; kwargs...)
@@ -99,6 +120,12 @@ Result returned by the SQP solver.
   `SQPOptions(diagnose=true)` was used, otherwise `nothing`.
 - `n_soc_steps::Int` — number of Second-Order Correction steps taken
   (zero unless `use_soc=true`).
+- `n_steps_clamped::Int` — number of iterations where the QP step norm
+  was clamped by the numerical safeguard (Phase 8.2 Part A).
+- `n_bfgs_skipped::Int` — number of iterations where the BFGS/L-BFGS
+  update was skipped due to a bad `(s, y)` pair (Phase 8.2 Part B).
+- `lm_lambda_final::T` — final value of the Levenberg-Marquardt damping
+  parameter. Zero if LM was never activated (Phase 8.2 Part C).
 """
 struct SQPResult{T <: AbstractFloat, V <: AbstractVector{T}}
     x::V
@@ -109,14 +136,17 @@ struct SQPResult{T <: AbstractFloat, V <: AbstractVector{T}}
     status::Symbol
     diagnostics::Union{Nothing, ProblemDiagnostics{T}}
     n_soc_steps::Int
+    n_steps_clamped::Int
+    n_bfgs_skipped::Int
+    lm_lambda_final::T
 end
 
-# Backward-compatible constructor — old call sites without diagnostics/n_soc_steps
+# Backward-compatible constructor — old call sites without diagnostics/n_soc_steps/safeguard counters
 function SQPResult(x::V, objective::T, iterations::Int, converged::Bool,
                    constraint_violation::T, status::Symbol) where {
                    T <: AbstractFloat, V <: AbstractVector{T}}
     return SQPResult{T, V}(x, objective, iterations, converged,
-                           constraint_violation, status, nothing, 0)
+                           constraint_violation, status, nothing, 0, 0, 0, zero(T))
 end
 
 """

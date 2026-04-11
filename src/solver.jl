@@ -54,6 +54,12 @@ function sqp_solve(
     # Build Lagrangian and its derivatives
     ws = SQPWorkspace(x0, n_ineq, n_eq)
     n_soc_steps = 0
+    # Phase 8.2 — numerical safeguard counters
+    n_steps_clamped = 0
+    n_bfgs_skipped = 0
+    lm_lambda = zero(T)
+    lm_good_streak = 0
+    lm_ever_activated = false
 
     has_external_hessian = hess_lag !== nothing
 
@@ -138,6 +144,16 @@ function sqp_solve(
             end
         end
 
+        # Phase 8.2 Part C — Levenberg-Marquardt regularization of H.
+        # When `lm_lambda > 0`, add `lm_lambda·I` to H before the QP solve.
+        # This bounds the step in directions where H has a small eigenvalue,
+        # preventing the QP from returning garbage steps on near-singular H.
+        if options.numerical_safeguards && lm_lambda > eps(T)
+            for jj in 1:n
+                ws.H[jj, jj] += lm_lambda
+            end
+        end
+
         # Update rho_k (Schittkowski eq 10) — only for line search
         if !use_trust_region && i > 1 && (n_eq > 0 || n_ineq > 0)
             dxHdx = dot(ws.dx, ws.H * ws.dx)
@@ -176,7 +192,29 @@ function sqp_solve(
             @warn "QP direction step failed"
             return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, i, false,
                                               constraint_violation_last, :qp_failed,
-                                              diagnostics, n_soc_steps)
+                                              diagnostics, n_soc_steps,
+                                              n_steps_clamped, n_bfgs_skipped, lm_lambda)
+        end
+
+        # Phase 8.2 Part A — step norm clamping.
+        # Prevent pathologically large steps from a near-singular BFGS
+        # Hessian or a poorly-conditioned QP from contaminating the line
+        # search and the downstream (s, y) curvature sample. Clamp to
+        # `step_clamp_factor · (1 + ‖x‖∞)` so normally-sized steps are
+        # untouched but 100× overshoots get rescaled to a sensible range.
+        step_clamped = false
+        if options.numerical_safeguards
+            step_norm = norm(ws.dx, Inf)
+            clamp_bound = options.step_clamp_factor * (one(T) + norm(ws.x, Inf))
+            if step_norm > clamp_bound && isfinite(clamp_bound) && step_norm > zero(T)
+                scale = clamp_bound / step_norm
+                ws.dx .*= scale
+                step_clamped = true
+                n_steps_clamped += 1
+                if options.verbose
+                    @debug "Step clamped" iteration=i step_norm clamp_bound scale
+                end
+            end
         end
 
         # Update multipliers
@@ -229,7 +267,8 @@ function sqp_solve(
                     end
                     return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, i, false,
                                                       constraint_violation_last, :trust_region_failed,
-                                                      diagnostics, n_soc_steps)
+                                                      diagnostics, n_soc_steps,
+                                                      n_steps_clamped, n_bfgs_skipped, lm_lambda)
                 end
             end
         else
@@ -289,7 +328,8 @@ function sqp_solve(
                 @warn "Line search failed" alpha
                 return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, i, false,
                                                   constraint_violation_last, :line_search_failed,
-                                                  diagnostics, n_soc_steps)
+                                                  diagnostics, n_soc_steps,
+                                                  n_steps_clamped, n_bfgs_skipped, lm_lambda)
             end
 
             ws.p = alpha * ws.dx
@@ -314,10 +354,33 @@ function sqp_solve(
                 end
                 return SQPResult{T, typeof(ws.x)}(ws.x, f_new, i, true,
                                                   constraint_violation, :converged,
-                                                  diagnostics, n_soc_steps)
+                                                  diagnostics, n_soc_steps,
+                                                  n_steps_clamped, n_bfgs_skipped, lm_lambda)
             end
 
-            # Hessian update — store (s, y) for L-BFGS history
+            # Phase 8.2 Part B — decide whether to trust this (s, y) pair.
+            # Only skip when:
+            #  (i)  the step was explicitly clamped — direction itself was wrong, or
+            #  (ii) the line search collapsed to a very tiny α — pathological direction.
+            # Non-convex curvature (sy < 0) is NOT a skip signal: robust BFGS
+            # handles mildly-negative curvature correctly via its z-interpolation,
+            # and legitimate non-convex NLPs like HS071 routinely produce such
+            # samples even on clean full steps.
+            bfgs_skipped = false
+            if options.numerical_safeguards
+                if step_clamped || alpha < options.bfgs_skip_alpha
+                    bfgs_skipped = true
+                    n_bfgs_skipped += 1
+                    if options.verbose
+                        @debug "BFGS update skipped" iteration=i step_clamped alpha
+                    end
+                end
+            end
+
+            # Hessian update — store (s, y) for L-BFGS history.
+            # The analytical Hessian refresh runs regardless of bfgs_skipped:
+            # the skip only affects the BFGS *fallback* path and L-BFGS history,
+            # because those are the paths that consume the suspect (s, y) sample.
             use_bfgs = false
 
             if has_external_hessian
@@ -339,7 +402,7 @@ function sqp_solve(
             if !use_bfgs && isposdef(Had_new)
                 ws.H .= Matrix{T}(Had_new)
                 ws.k_reset = i
-            else
+            elseif !bfgs_skipped
                 use_bfgs = true
                 if has_external_hessian
                     grad_new = df(ws.x)
@@ -350,17 +413,50 @@ function sqp_solve(
                 end
                 ws.H, ws.k_reset = update_hessian!(ws.H, ws.p, q, i, ws.k_reset)
             end
+            # else: analytical refresh not available AND sample is bad → keep H unchanged
 
-            # Store L-BFGS history
-            push!(ws.s_history, copy(ws.p))
-            if has_external_hessian
-                push!(ws.y_history, df(ws.x) .- df(ws.x .- ws.p))
-            else
-                push!(ws.y_history, dl(ws.x) .- dl(ws.x .- ws.p))
+            # Store L-BFGS history only when we trust this (s, y) pair
+            if !bfgs_skipped
+                push!(ws.s_history, copy(ws.p))
+                if has_external_hessian
+                    push!(ws.y_history, df(ws.x) .- df(ws.x .- ws.p))
+                else
+                    push!(ws.y_history, dl(ws.x) .- dl(ws.x .- ws.p))
+                end
+                while length(ws.s_history) > ws.lbfgs_memory
+                    popfirst!(ws.s_history)
+                    popfirst!(ws.y_history)
+                end
             end
-            while length(ws.s_history) > ws.lbfgs_memory
-                popfirst!(ws.s_history)
-                popfirst!(ws.y_history)
+
+            # Phase 8.2 Part C — adaptive LM damping update.
+            # Grow on bad iterations (clamped or skipped).
+            # Once the solver has entered "damped mode" (ever_activated = true),
+            # shrink only slowly on clean steps and keep a floor. This prevents
+            # LM from collapsing between pathological iterations.
+            if options.numerical_safeguards
+                if step_clamped || bfgs_skipped
+                    lm_lambda = lm_lambda > eps(T) ?
+                                min(lm_lambda * options.lm_grow, options.lm_max) :
+                                options.lm_min_active
+                    lm_good_streak = 0
+                    lm_ever_activated = true
+                elseif alpha >= T(0.9)
+                    lm_good_streak += 1
+                    if lm_good_streak >= 3
+                        lm_lambda *= options.lm_shrink
+                        # Keep a floor while the solver has shown ill-conditioning.
+                        # Only fully release LM after a long clean streak.
+                        if lm_ever_activated && lm_good_streak < 20
+                            lm_lambda = max(lm_lambda, options.lm_min_active)
+                        elseif lm_lambda < options.lm_min
+                            lm_lambda = zero(T)
+                        end
+                    end
+                else
+                    # partial step — hold lm_lambda, reset the streak
+                    lm_good_streak = 0
+                end
             end
 
             constraint_violation_last = constraint_violation
@@ -391,7 +487,8 @@ function sqp_solve(
 
     return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, options.max_iterations, false,
                                       constraint_violation_last, :max_iterations,
-                                      diagnostics, n_soc_steps)
+                                      diagnostics, n_soc_steps,
+                                      n_steps_clamped, n_bfgs_skipped, lm_lambda)
 end
 
 # Convenience wrappers
