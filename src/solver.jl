@@ -60,8 +60,22 @@ function sqp_solve(
     lm_lambda = zero(T)
     lm_good_streak = 0
     lm_ever_activated = false
+    # Phase 9.0 — analytical Hessian counter
+    n_hessian_corrections = 0
+    # Mid-solve fallback tracking: if we're in analytical mode but LM damping
+    # saturates the maximum for several consecutive iterations, the analytical
+    # path isn't helping and we switch to BFGS for the rest of the solve.
+    lm_saturated_streak = 0
 
     has_external_hessian = hess_lag !== nothing
+
+    # Phase 9.0 — decide whether to use analytical Hessian this run.
+    # :analytical forces it on, :bfgs forces it off, :auto picks based on size.
+    use_analytical_hessian =
+        !has_external_hessian && (
+            options.hessian_strategy == :analytical ||
+            (options.hessian_strategy == :auto && n <= options.auto_hessian_max_n)
+        )
 
     # Only build Lagrangian derivative functions if no external Hessian provided
     dl = nothing
@@ -100,6 +114,18 @@ function sqp_solve(
         ws.H .= Matrix{T}(Had)
         if options.verbose
             @info "Hessian is positive definite"
+        end
+    elseif use_analytical_hessian || has_external_hessian
+        # Phase 9.0 — keep the true curvature directions via eigenvalue
+        # correction; BFGS would discard them entirely.
+        ws.H .= Matrix{T}(Had)
+        _, corrected, λmin = modify_eigenvalues!(ws.H;
+                                floor = options.hessian_correction_floor)
+        if corrected
+            n_hessian_corrections += 1
+            if options.verbose
+                @info "Initial Hessian eigenvalue-corrected" λmin
+            end
         end
     else
         ws.H .= Matrix{T}(I, n, n)
@@ -193,7 +219,8 @@ function sqp_solve(
             return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, i, false,
                                               constraint_violation_last, :qp_failed,
                                               diagnostics, n_soc_steps,
-                                              n_steps_clamped, n_bfgs_skipped, lm_lambda)
+                                              n_steps_clamped, n_bfgs_skipped, lm_lambda,
+                                              n_hessian_corrections)
         end
 
         # Phase 8.2 Part A — step norm clamping.
@@ -268,7 +295,8 @@ function sqp_solve(
                     return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, i, false,
                                                       constraint_violation_last, :trust_region_failed,
                                                       diagnostics, n_soc_steps,
-                                                      n_steps_clamped, n_bfgs_skipped, lm_lambda)
+                                                      n_steps_clamped, n_bfgs_skipped, lm_lambda,
+                                                      n_hessian_corrections)
                 end
             end
         else
@@ -329,7 +357,8 @@ function sqp_solve(
                 return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, i, false,
                                                   constraint_violation_last, :line_search_failed,
                                                   diagnostics, n_soc_steps,
-                                                  n_steps_clamped, n_bfgs_skipped, lm_lambda)
+                                                  n_steps_clamped, n_bfgs_skipped, lm_lambda,
+                                                  n_hessian_corrections)
             end
 
             ws.p = alpha * ws.dx
@@ -355,7 +384,8 @@ function sqp_solve(
                 return SQPResult{T, typeof(ws.x)}(ws.x, f_new, i, true,
                                                   constraint_violation, :converged,
                                                   diagnostics, n_soc_steps,
-                                                  n_steps_clamped, n_bfgs_skipped, lm_lambda)
+                                                  n_steps_clamped, n_bfgs_skipped, lm_lambda,
+                                                  n_hessian_corrections)
             end
 
             # Phase 8.2 Part B — decide whether to trust this (s, y) pair.
@@ -378,32 +408,60 @@ function sqp_solve(
             end
 
             # Hessian update — store (s, y) for L-BFGS history.
-            # The analytical Hessian refresh runs regardless of bfgs_skipped:
-            # the skip only affects the BFGS *fallback* path and L-BFGS history,
-            # because those are the paths that consume the suspect (s, y) sample.
+            #
+            # Priority order:
+            #   1. external hess_lag (always tried first when provided)
+            #   2. analytical ∇²L(x) via AD — always attempted when available.
+            #      - PD: use directly
+            #      - non-PD and use_analytical_hessian=true: Phase 9.0
+            #        eigenvalue correction
+            #      - non-PD and use_analytical_hessian=false: fall through
+            #        to BFGS (preserves v0.8.2 behavior for :bfgs strategy)
+            #   3. BFGS update (fallback)
+            #
+            # The analytical path runs regardless of bfgs_skipped because
+            # it doesn't consume the suspect (s, y) sample. The
+            # bfgs_skipped flag only gates the BFGS fallback.
             use_bfgs = false
+            analytical_refreshed = false
 
             if has_external_hessian
                 Had_new = try
                     hess_lag(ws.x, ws.sigma, ws.lambda)
                 catch
-                    use_bfgs = true
                     nothing
                 end
             else
                 Had_new = try
                     d2l(ws.x)
                 catch
-                    use_bfgs = true
                     nothing
                 end
             end
 
-            if !use_bfgs && isposdef(Had_new)
+            if Had_new === nothing || all(iszero, Had_new)
+                use_bfgs = true
+            elseif isposdef(Had_new)
                 ws.H .= Matrix{T}(Had_new)
                 ws.k_reset = i
-            elseif !bfgs_skipped
+                analytical_refreshed = true
+            elseif use_analytical_hessian || has_external_hessian
+                # Phase 9.0 eigenvalue correction: the true Hessian's
+                # directions encode real curvature BFGS cannot see —
+                # clip eigenvalues to a PD floor rather than discarding it.
+                ws.H .= Matrix{T}(Had_new)
+                _, corrected, _ = modify_eigenvalues!(ws.H;
+                                    floor = options.hessian_correction_floor)
+                if corrected
+                    n_hessian_corrections += 1
+                end
+                ws.k_reset = i
+                analytical_refreshed = true
+            else
                 use_bfgs = true
+            end
+
+            if use_bfgs && !bfgs_skipped
                 if has_external_hessian
                     grad_new = df(ws.x)
                     grad_old = df(ws.x .- ws.p)
@@ -459,6 +517,31 @@ function sqp_solve(
                 end
             end
 
+            # Phase 9.0 — mid-solve fallback. If the analytical-Hessian path
+            # has driven LM damping to its maximum and kept it there for
+            # many consecutive iterations, the analytical direction isn't
+            # helping. Switch to BFGS for the rest of the solve, reset the
+            # Hessian to identity (so BFGS rebuilds fresh), and clear
+            # LM/L-BFGS state.
+            if use_analytical_hessian && lm_lambda >= options.lm_max * T(0.99)
+                lm_saturated_streak += 1
+                if lm_saturated_streak >= 10
+                    use_analytical_hessian = false
+                    ws.H .= Matrix{T}(I, n, n)
+                    ws.k_reset = i
+                    empty!(ws.s_history)
+                    empty!(ws.y_history)
+                    lm_lambda = zero(T)
+                    lm_ever_activated = false
+                    lm_good_streak = 0
+                    if options.verbose
+                        @info "Analytical Hessian ineffective — falling back to BFGS" iteration=i
+                    end
+                end
+            else
+                lm_saturated_streak = 0
+            end
+
             constraint_violation_last = constraint_violation
             ws.f_last = f_new
 
@@ -488,7 +571,8 @@ function sqp_solve(
     return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, options.max_iterations, false,
                                       constraint_violation_last, :max_iterations,
                                       diagnostics, n_soc_steps,
-                                      n_steps_clamped, n_bfgs_skipped, lm_lambda)
+                                      n_steps_clamped, n_bfgs_skipped, lm_lambda,
+                                      n_hessian_corrections)
 end
 
 # Convenience wrappers

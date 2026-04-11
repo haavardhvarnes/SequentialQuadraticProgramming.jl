@@ -32,6 +32,10 @@ struct SQPOptions{T <: AbstractFloat}
     lm_max::T                   # maximum LM damping                          (default 1e6)
     lm_min::T                   # below this, LM is turned off                (default 1e-8)
     lm_min_active::T            # bootstrap LM value when first activated     (default 1e-4)
+    # Phase 9.0: analytical Hessian of the Lagrangian
+    hessian_strategy::Symbol    # :bfgs, :analytical, or :auto                (default :bfgs)
+    auto_hessian_max_n::Int     # :auto uses analytical when n ≤ this         (default 50)
+    hessian_correction_floor::T # eigenvalue floor for non-PD analytical H    (default 1e-8)
 end
 
 function SQPOptions{T}(;
@@ -60,13 +64,17 @@ function SQPOptions{T}(;
     lm_max::T = T(1e4),
     lm_min::T = T(1e-8),
     lm_min_active::T = T(1e-4),
+    hessian_strategy::Symbol = :bfgs,
+    auto_hessian_max_n::Int = 50,
+    hessian_correction_floor::T = T(1e-8),
 ) where {T <: AbstractFloat}
     SQPOptions{T}(max_iterations, xtol, ftol, constraint_tol, verbose,
                   line_search_mu, line_search_beta, phi0_lookback, qp_max_iter,
                   globalization, trust_region_init, trust_region_max, trust_region_eta,
                   diagnose, use_soc, soc_max_tries,
                   numerical_safeguards, step_clamp_factor, bfgs_skip_alpha,
-                  bfgs_skip_curvature, lm_grow, lm_shrink, lm_max, lm_min, lm_min_active)
+                  bfgs_skip_curvature, lm_grow, lm_shrink, lm_max, lm_min, lm_min_active,
+                  hessian_strategy, auto_hessian_max_n, hessian_correction_floor)
 end
 
 SQPOptions(; kwargs...) = SQPOptions{Float64}(; kwargs...)
@@ -126,6 +134,10 @@ Result returned by the SQP solver.
   update was skipped due to a bad `(s, y)` pair (Phase 8.2 Part B).
 - `lm_lambda_final::T` — final value of the Levenberg-Marquardt damping
   parameter. Zero if LM was never activated (Phase 8.2 Part C).
+- `n_hessian_corrections::Int` — number of iterations where the analytical
+  Hessian required eigenvalue clipping to become positive definite
+  (Phase 9.0). Zero if BFGS was used or the analytical Hessian was
+  already PD.
 """
 struct SQPResult{T <: AbstractFloat, V <: AbstractVector{T}}
     x::V
@@ -139,6 +151,7 @@ struct SQPResult{T <: AbstractFloat, V <: AbstractVector{T}}
     n_steps_clamped::Int
     n_bfgs_skipped::Int
     lm_lambda_final::T
+    n_hessian_corrections::Int
 end
 
 # Backward-compatible constructor — old call sites without diagnostics/n_soc_steps/safeguard counters
@@ -146,7 +159,7 @@ function SQPResult(x::V, objective::T, iterations::Int, converged::Bool,
                    constraint_violation::T, status::Symbol) where {
                    T <: AbstractFloat, V <: AbstractVector{T}}
     return SQPResult{T, V}(x, objective, iterations, converged,
-                           constraint_violation, status, nothing, 0, 0, 0, zero(T))
+                           constraint_violation, status, nothing, 0, 0, 0, zero(T), 0)
 end
 
 """

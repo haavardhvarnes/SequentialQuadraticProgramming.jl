@@ -83,6 +83,57 @@ function ensure_positive_definite!(H::AbstractMatrix{T}) where {T <: AbstractFlo
 end
 
 """
+    modify_eigenvalues!(H; floor=1e-8, method=:abs)
+
+In-place symmetric eigenvalue correction for the Hessian. Preserves the
+true curvature *directions* in `H`; only modifies the sign/magnitude of
+eigenvalues that are too small or negative.
+
+Two methods:
+
+- `:abs` (default) — replace each eigenvalue `λᵢ` with `max(|λᵢ|, floor)`.
+  Negative curvature becomes positive curvature of equal magnitude. This
+  is the "modified Newton" approach: the QP subproblem minimizes
+  `(1/2)dᵀ|∇²L|d + gᵀd`, which makes progress along directions of
+  negative curvature at the same rate as positive curvature. Best for
+  highly indefinite analytical Hessians (HS071-style bilinear, HS092-style
+  oscillating curvature).
+
+- `:clip` — replace each eigenvalue `λᵢ` with `max(λᵢ, floor)`. Negative
+  eigenvalues get clipped to a small positive value, losing their
+  magnitude information. Cheaper but much more aggressive; use only when
+  the analytical Hessian is mostly PD with a few slightly-negative
+  eigenvalues.
+
+Returns `(H, was_modified::Bool, min_eigenvalue_before::T)`.
+"""
+function modify_eigenvalues!(H::AbstractMatrix{T};
+                             floor::T = T(1e-8),
+                             method::Symbol = :abs) where {T <: AbstractFloat}
+    Hsym = Symmetric(Matrix{T}((H .+ H') ./ 2))
+    F = eigen(Hsym)
+    λ_min = minimum(F.values)
+
+    if method == :abs
+        # Modified Newton: |λᵢ| with positive floor
+        needs_mod = any(λ -> λ < floor, F.values)
+        needs_mod || return H, false, λ_min
+        λ_new = [max(abs(λ), floor) for λ in F.values]
+    elseif method == :clip
+        if λ_min >= floor
+            return H, false, λ_min
+        end
+        λ_new = max.(F.values, floor)
+    else
+        error("modify_eigenvalues! method must be :abs or :clip, got :$method")
+    end
+
+    H .= F.vectors * Diagonal(λ_new) * F.vectors'
+    H .= (H .+ H') ./ 2     # symmetrize to kill roundoff
+    return H, true, λ_min
+end
+
+"""
     update_hessian!(H, s, y, iteration, k_reset)
 
 Perform BFGS Hessian update using robust BFGS, with initial scaling on first iteration.
