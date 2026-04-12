@@ -17,3 +17,9 @@ SQPOptions
 ```@docs
 SQPResult
 ```
+
+## Workspace (Internal)
+
+```@docs
+SequentialQuadraticProgramming.SQPWorkspace
+```

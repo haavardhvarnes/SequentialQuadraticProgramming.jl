@@ -1,6 +1,6 @@
 # Globalization Strategies
 
-The SQP solver supports two globalization strategies for ensuring convergence: **line search** (default) and **trust region**.
+The SQP solver supports three globalization strategies: **line search** (default), **filter line search**, and **trust region**.
 
 ## Line Search (Default)
 
@@ -46,11 +46,37 @@ result = sqp_solve(f, g, h, x0;
 - ``\rho > 0.75`` and step at boundary: ``\Delta \leftarrow \min(2\Delta, \Delta_\text{max})``
 - ``\rho < 0.25``: ``\Delta \leftarrow \Delta / 4``
 
+## Filter Line Search (Wächter-Biegler)
+
+The filter line search replaces the merit function with a **bi-objective filter** that tracks pairs ``(f, \theta)`` where ``\theta`` is the constraint violation. A trial step is accepted if it either:
+
+- **f-step**: Reduces the objective sufficiently (switching condition met, Armijo on ``f``)
+- **h-step**: Is not dominated by any entry in the filter (improves ``f`` or ``\theta`` or both)
+
+This avoids the penalty parameter tuning inherent in merit-function approaches.
+
+```julia
+result = sqp_solve(f, g, h, x0;
+    options = SQPOptions(
+        globalization = :filter_line_search,
+        filter_max_size = 50,         # maximum filter entries
+        filter_alpha_min = 1e-6,      # minimum step size before fallback
+    ))
+```
+
+**When the filter accepts a step, the result tracks which type:**
+- `result.n_filter_f_steps` — steps accepted by objective descent
+- `result.n_filter_h_steps` — steps accepted by filter dominance
+- `result.n_filter_fallbacks` — iterations where the filter fell through to the Schittkowski merit line search
+
+**Best for:** Problems where the augmented Lagrangian merit function oscillates, e.g., HS092 (352 iters with `:line_search` → ~58 iters with `:filter_line_search`).
+
 ## When to Use Which
 
 | Scenario | Recommended |
 |:---------|:------------|
 | General-purpose | Line search (default) |
+| Merit function oscillating (large penalty swings) | Filter line search |
 | Ill-conditioned Hessian | Trust region |
 | Fast convergence expected | Line search |
 | Robustness over speed | Trust region |

@@ -46,3 +46,29 @@ The solver declares convergence when **both** conditions hold:
 - Scale your problem: keep objective and constraint values in similar ranges
 - Avoid very large bounds (use `Inf` instead of `1e20`)
 - Check that constraint functions return consistent-length vectors
+
+### Filter Line Search Not Converging
+
+- Check `n_filter_fallbacks` — frequent fallbacks mean the filter is too conservative. Try increasing `filter_max_size`.
+- If `n_filter_h_steps` dominates, the solver is mostly improving feasibility. The problem may need a feasible starting point.
+- The filter seeds with ``(\!-\infty, \theta_\max)`` to bound constraint violation. If ``\theta_0`` is already near zero, increase `filter_switching_delta` to bias toward f-steps.
+
+### Numerical Safeguard Tuning
+
+The default safeguards work well for most problems. When tuning:
+
+| Option | Default | Effect of increasing | Effect of decreasing |
+|:-------|:--------|:---------------------|:---------------------|
+| `step_clamp_factor` | 100 | Allows larger steps (less conservative) | Clamps more aggressively |
+| `bfgs_skip_alpha` | 1e-3 | Skips BFGS on more iterations | Only skips on near-zero steps |
+| `lm_grow` | 4 | LM damping ramps up faster | Slower ramp-up |
+| `lm_shrink` | 0.25 | LM damping decays faster on good steps | Slower decay |
+| `lm_max` | 1e4 | Higher maximum damping | Limits regularization |
+
+### Hessian Strategy Selection
+
+- `:bfgs` (default): Safe for all problems. May stall on bilinear/highly nonlinear objectives (HS108).
+- `:analytical`: Computes true ``\nabla^2 L`` with eigenvalue correction. Faster convergence on small non-convex problems, but ``O(n^3)`` per iteration and may find wrong stationary point on some problems (HS092).
+- `:auto`: Picks `:analytical` for ``n \leq 50``, `:bfgs` otherwise.
+
+See [Hessian Strategies](@ref) tutorial for detailed guidance.

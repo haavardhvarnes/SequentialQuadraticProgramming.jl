@@ -16,6 +16,8 @@ makedocs(
             "JuMP Integration" => "tutorials/jump_integration.md",
             "AD Backends" => "tutorials/ad_backends.md",
             "Globalization Strategies" => "tutorials/globalization.md",
+            "Problem Diagnostics" => "tutorials/diagnostics.md",
+            "Hessian Strategies" => "tutorials/hessian_strategies.md",
         ],
         "API Reference" => [
             "Problem Definition" => "api/problem.md",
@@ -23,6 +25,7 @@ makedocs(
             "QP Subsolvers" => "api/qp_solvers.md",
             "Hessian Updates" => "api/hessian.md",
             "Derivatives" => "api/derivatives.md",
+            "Diagnostics & Filter" => "api/diagnostics.md",
         ],
         "Design & Theory" => [
             "Algorithm Overview" => "design/algorithm.md",
