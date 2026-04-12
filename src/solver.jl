@@ -66,6 +66,12 @@ function sqp_solve(
     # saturates the maximum for several consecutive iterations, the analytical
     # path isn't helping and we switch to BFGS for the rest of the solve.
     lm_saturated_streak = 0
+    # Phase 9.1 — filter line search state
+    use_filter = options.globalization == :filter_line_search
+    filter = Filter{T}(; max_size = options.filter_max_size)
+    n_filter_f_steps = 0
+    n_filter_h_steps = 0
+    n_filter_fallbacks = 0
 
     has_external_hessian = hess_lag !== nothing
 
@@ -154,6 +160,19 @@ function sqp_solve(
     trust_radius = options.trust_region_init
     use_trust_region = options.globalization == :trust_region
 
+    # Phase 9.1 — seed the filter with an upper bound on constraint violation.
+    # The Wächter-Biegler convention starts the filter with an entry
+    # (−∞, θ_max) that enforces θ ≤ θ_max for all accepted iterates. This
+    # gives the filter *something to bound* even on nearly-feasible starts,
+    # which otherwise leave the filter empty and let the f-step branch
+    # accept any descent direction blindly.
+    if use_filter
+        theta_0 = theta_constraint_violation(g(ws.x), h(ws.x))
+        theta_max = max(T(1e4), T(10) * theta_0 + one(T))
+        # Store (-Inf, theta_max) so any trial with theta > theta_max is dominated
+        push!(filter.entries, (T(-Inf), theta_max))
+    end
+
     if options.verbose
         header = use_trust_region ? "Iter\t\tobjective\tnorm_dx\t\tΔ\t\tc_viol" :
                                     "Iter\t\tobjective\tnorm_dx\t\tstep\t\tc_viol"
@@ -220,7 +239,9 @@ function sqp_solve(
                                               constraint_violation_last, :qp_failed,
                                               diagnostics, n_soc_steps,
                                               n_steps_clamped, n_bfgs_skipped, lm_lambda,
-                                              n_hessian_corrections)
+                                              n_hessian_corrections,
+                                              n_filter_f_steps, n_filter_h_steps,
+                                              n_filter_fallbacks, length(filter))
         end
 
         # Phase 8.2 Part A — step norm clamping.
@@ -296,7 +317,9 @@ function sqp_solve(
                                                       constraint_violation_last, :trust_region_failed,
                                                       diagnostics, n_soc_steps,
                                                       n_steps_clamped, n_bfgs_skipped, lm_lambda,
-                                                      n_hessian_corrections)
+                                                      n_hessian_corrections,
+                                                      n_filter_f_steps, n_filter_h_steps,
+                                                      n_filter_fallbacks, length(filter))
                 end
             end
         else
@@ -305,63 +328,113 @@ function sqp_solve(
             start_idx = max(1, length(ws.phi_history) - min(i, lookback))
             phi0max = maximum(ws.phi_history[start_idx:end])
 
-            # Second-Order Correction path: only available with COSMOQPSolver
-            # (the correction QP implementation is COSMO-only in v0.8.1).
-            if options.use_soc && qp_solver isa COSMOQPSolver
-                soc_cb = function()
-                    # Evaluate true constraints at the full-step trial point
-                    x_trial = ws.x .+ ws.dx
-                    c_trial = T[g(x_trial); h(x_trial)]
-                    # Correction QP: drive the linearized residual toward zero
-                    # using the primary-point Jacobian A. Inequality rows
-                    # (first n_ineq) use one-sided bounds; equality rows use
-                    # two-sided bounds.
-                    d_c = solve_qp_correction(qp_solver, H_dense, c_trial, A, df(ws.x), n_ineq)
-                    if d_c === nothing
-                        return (merit_phi, dphi, false)
-                    end
-                    dx_soc = ws.dx .+ d_c
+            # ─────────────────────────────────────────────────────────────
+            # Phase 9.1 — Filter line search (Wächter-Biegler).
+            # Tries the filter acceptance criterion first; if it rejects all
+            # backtracked α values, falls through to the Schittkowski merit
+            # line search. The fallback gives us a well-tested safety net
+            # while avoiding the need for a full restoration phase.
+            # ─────────────────────────────────────────────────────────────
+            filter_accepted = false
+            if use_filter
+                f_k = f(ws.x)
+                theta_k = theta_constraint_violation(g(ws.x), h(ws.x))
+                grad_f_dot_d = dot(df(ws.x), ws.dx)
 
-                    # Merit function along the corrected direction
-                    phi_soc_fn(a_) = begin
-                        x_try = ws.x .+ a_ .* dx_soc
-                        pensig_try = ws.pensig .+ a_ .* (ws.sigma .- ws.pensig)
-                        penlam_try = ws.penlam .+ a_ .* (ws.lambda .- ws.penlam)
-                        augmented_lagrangian(f(x_try), g(x_try), h(x_try),
-                                             pensig_try, penlam_try, ws.r)
-                    end
-                    dphi_soc_fn(a_) = ForwardDiff.derivative(phi_soc_fn, a_)
+                alpha_f, accepted, step_type, f_alpha_tr, theta_alpha_tr =
+                    filter_line_search(filter, f, g, h, ws.x, ws.dx,
+                                       f_k, theta_k, grad_f_dot_d, options)
 
-                    # Commit the corrected direction so ws.p = α·ws.dx downstream
-                    ws.dx = dx_soc
-                    return (phi_soc_fn, dphi_soc_fn, true)
+                if accepted
+                    alpha = alpha_f
+                    ls_comment = string("filter ", step_type == :f ? "f-step" : "h-step",
+                                        " α=", round(alpha, digits = 4))
+                    ws.pensig .+= alpha .* (ws.sigma .- ws.pensig)
+                    ws.penlam .+= alpha .* (ws.lambda .- ws.penlam)
+                    # Sync merit-function history so the Schittkowski
+                    # fallback on later iterations has a valid phi0max.
+                    push!(ws.phi_history, merit_phi(alpha))
+
+                    if step_type == :f
+                        n_filter_f_steps += 1
+                    else
+                        # Augment filter only on h-steps (WB 2006 convention)
+                        n_filter_h_steps += 1
+                        augment!(filter, f_k, theta_k,
+                                 options.filter_gamma_f, options.filter_gamma_theta)
+                    end
+
+                    ws.p = alpha * ws.dx
+                    filter_accepted = true
+                else
+                    n_filter_fallbacks += 1
+                    if options.verbose
+                        @debug "Filter line search fell through — using Schittkowski merit" iteration=i
+                    end
+                end
+            end
+
+            if !filter_accepted
+                # Second-Order Correction path: only available with COSMOQPSolver
+                # (the correction QP implementation is COSMO-only in v0.8.1).
+                if options.use_soc && qp_solver isa COSMOQPSolver
+                    soc_cb = function()
+                        # Evaluate true constraints at the full-step trial point
+                        x_trial = ws.x .+ ws.dx
+                        c_trial = T[g(x_trial); h(x_trial)]
+                        # Correction QP: drive the linearized residual toward zero
+                        # using the primary-point Jacobian A. Inequality rows
+                        # (first n_ineq) use one-sided bounds; equality rows use
+                        # two-sided bounds.
+                        d_c = solve_qp_correction(qp_solver, H_dense, c_trial, A, df(ws.x), n_ineq)
+                        if d_c === nothing
+                            return (merit_phi, dphi, false)
+                        end
+                        dx_soc = ws.dx .+ d_c
+
+                        # Merit function along the corrected direction
+                        phi_soc_fn(a_) = begin
+                            x_try = ws.x .+ a_ .* dx_soc
+                            pensig_try = ws.pensig .+ a_ .* (ws.sigma .- ws.pensig)
+                            penlam_try = ws.penlam .+ a_ .* (ws.lambda .- ws.penlam)
+                            augmented_lagrangian(f(x_try), g(x_try), h(x_try),
+                                                 pensig_try, penlam_try, ws.r)
+                        end
+                        dphi_soc_fn(a_) = ForwardDiff.derivative(phi_soc_fn, a_)
+
+                        # Commit the corrected direction so ws.p = α·ws.dx downstream
+                        ws.dx = dx_soc
+                        return (phi_soc_fn, dphi_soc_fn, true)
+                    end
+
+                    alpha, phi_val, ls_comment, used_soc = schittkowski_line_search_soc(
+                        merit_phi, dphi, phi0max, one(T);
+                        soc_callback = soc_cb,
+                        mu = options.line_search_mu, beta = options.line_search_beta)
+                    used_soc && (n_soc_steps += 1)
+                else
+                    alpha, phi_val, ls_comment = schittkowski_line_search(
+                        merit_phi, dphi, phi0max, one(T);
+                        mu = options.line_search_mu, beta = options.line_search_beta)
                 end
 
-                alpha, phi_val, ls_comment, used_soc = schittkowski_line_search_soc(
-                    merit_phi, dphi, phi0max, one(T);
-                    soc_callback = soc_cb,
-                    mu = options.line_search_mu, beta = options.line_search_beta)
-                used_soc && (n_soc_steps += 1)
-            else
-                alpha, phi_val, ls_comment = schittkowski_line_search(
-                    merit_phi, dphi, phi0max, one(T);
-                    mu = options.line_search_mu, beta = options.line_search_beta)
+                ws.pensig .+= alpha .* (ws.sigma .- ws.pensig)
+                ws.penlam .+= alpha .* (ws.lambda .- ws.penlam)
+                push!(ws.phi_history, min(phi_val, phi0max))
+
+                if isnan(alpha) || isinf(alpha)
+                    @warn "Line search failed" alpha
+                    return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, i, false,
+                                                      constraint_violation_last, :line_search_failed,
+                                                      diagnostics, n_soc_steps,
+                                                      n_steps_clamped, n_bfgs_skipped, lm_lambda,
+                                                      n_hessian_corrections,
+                                                      n_filter_f_steps, n_filter_h_steps,
+                                                      n_filter_fallbacks, length(filter))
+                end
+
+                ws.p = alpha * ws.dx
             end
-
-            ws.pensig .+= alpha .* (ws.sigma .- ws.pensig)
-            ws.penlam .+= alpha .* (ws.lambda .- ws.penlam)
-            push!(ws.phi_history, min(phi_val, phi0max))
-
-            if isnan(alpha) || isinf(alpha)
-                @warn "Line search failed" alpha
-                return SQPResult{T, typeof(ws.x)}(ws.x, ws.f_last, i, false,
-                                                  constraint_violation_last, :line_search_failed,
-                                                  diagnostics, n_soc_steps,
-                                                  n_steps_clamped, n_bfgs_skipped, lm_lambda,
-                                                  n_hessian_corrections)
-            end
-
-            ws.p = alpha * ws.dx
         end
 
         if step_accepted
@@ -385,7 +458,9 @@ function sqp_solve(
                                                   constraint_violation, :converged,
                                                   diagnostics, n_soc_steps,
                                                   n_steps_clamped, n_bfgs_skipped, lm_lambda,
-                                                  n_hessian_corrections)
+                                                  n_hessian_corrections,
+                                                  n_filter_f_steps, n_filter_h_steps,
+                                                  n_filter_fallbacks, length(filter))
             end
 
             # Phase 8.2 Part B — decide whether to trust this (s, y) pair.
@@ -572,7 +647,9 @@ function sqp_solve(
                                       constraint_violation_last, :max_iterations,
                                       diagnostics, n_soc_steps,
                                       n_steps_clamped, n_bfgs_skipped, lm_lambda,
-                                      n_hessian_corrections)
+                                      n_hessian_corrections,
+                                      n_filter_f_steps, n_filter_h_steps,
+                                      n_filter_fallbacks, length(filter))
 end
 
 # Convenience wrappers

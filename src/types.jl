@@ -36,6 +36,16 @@ struct SQPOptions{T <: AbstractFloat}
     hessian_strategy::Symbol    # :bfgs, :analytical, or :auto                (default :bfgs)
     auto_hessian_max_n::Int     # :auto uses analytical when n ≤ this         (default 50)
     hessian_correction_floor::T # eigenvalue floor for non-PD analytical H    (default 1e-8)
+    # Phase 9.1: filter line search (Wächter-Biegler)
+    # Enabled via `globalization = :filter_line_search`.
+    filter_gamma_f::T           # sufficient objective decrease factor        (default 1e-5)
+    filter_gamma_theta::T       # sufficient feasibility decrease factor      (default 1e-5)
+    filter_armijo_eta::T        # Armijo parameter on f-step                  (default 1e-4)
+    filter_switching_s_phi::T   # switching-condition exponent on ∇f'd        (default 2.3)
+    filter_switching_s_theta::T # switching-condition exponent on θ           (default 1.1)
+    filter_switching_delta::T   # switching-condition scale                   (default 1.0)
+    filter_max_size::Int        # cap on filter entries (FIFO eviction)       (default 50)
+    filter_alpha_min::T         # minimum α before falling back to merit LS   (default 1e-6)
 end
 
 function SQPOptions{T}(;
@@ -67,6 +77,14 @@ function SQPOptions{T}(;
     hessian_strategy::Symbol = :bfgs,
     auto_hessian_max_n::Int = 50,
     hessian_correction_floor::T = T(1e-8),
+    filter_gamma_f::T = T(1e-5),
+    filter_gamma_theta::T = T(1e-5),
+    filter_armijo_eta::T = T(1e-4),
+    filter_switching_s_phi::T = T(2.3),
+    filter_switching_s_theta::T = T(1.1),
+    filter_switching_delta::T = T(1.0),
+    filter_max_size::Int = 50,
+    filter_alpha_min::T = T(1e-6),
 ) where {T <: AbstractFloat}
     SQPOptions{T}(max_iterations, xtol, ftol, constraint_tol, verbose,
                   line_search_mu, line_search_beta, phi0_lookback, qp_max_iter,
@@ -74,7 +92,10 @@ function SQPOptions{T}(;
                   diagnose, use_soc, soc_max_tries,
                   numerical_safeguards, step_clamp_factor, bfgs_skip_alpha,
                   bfgs_skip_curvature, lm_grow, lm_shrink, lm_max, lm_min, lm_min_active,
-                  hessian_strategy, auto_hessian_max_n, hessian_correction_floor)
+                  hessian_strategy, auto_hessian_max_n, hessian_correction_floor,
+                  filter_gamma_f, filter_gamma_theta, filter_armijo_eta,
+                  filter_switching_s_phi, filter_switching_s_theta,
+                  filter_switching_delta, filter_max_size, filter_alpha_min)
 end
 
 SQPOptions(; kwargs...) = SQPOptions{Float64}(; kwargs...)
@@ -138,6 +159,17 @@ Result returned by the SQP solver.
   Hessian required eigenvalue clipping to become positive definite
   (Phase 9.0). Zero if BFGS was used or the analytical Hessian was
   already PD.
+- `n_filter_f_steps::Int` — number of iterations accepted via the filter
+  line search as "f-type" steps (sufficient Armijo descent on the
+  objective, Phase 9.1). Zero unless `globalization = :filter_line_search`.
+- `n_filter_h_steps::Int` — number of iterations accepted via the filter
+  line search as "h-type" steps (sufficient reduction in either
+  objective or constraint violation, Phase 9.1). Zero unless
+  `globalization = :filter_line_search`.
+- `n_filter_fallbacks::Int` — number of iterations where the filter line
+  search rejected all trial step sizes and the solver fell through to
+  the Schittkowski merit line search (Phase 9.1).
+- `filter_size_final::Int` — final number of entries in the filter.
 """
 struct SQPResult{T <: AbstractFloat, V <: AbstractVector{T}}
     x::V
@@ -152,6 +184,10 @@ struct SQPResult{T <: AbstractFloat, V <: AbstractVector{T}}
     n_bfgs_skipped::Int
     lm_lambda_final::T
     n_hessian_corrections::Int
+    n_filter_f_steps::Int
+    n_filter_h_steps::Int
+    n_filter_fallbacks::Int
+    filter_size_final::Int
 end
 
 # Backward-compatible constructor — old call sites without diagnostics/n_soc_steps/safeguard counters
@@ -159,7 +195,8 @@ function SQPResult(x::V, objective::T, iterations::Int, converged::Bool,
                    constraint_violation::T, status::Symbol) where {
                    T <: AbstractFloat, V <: AbstractVector{T}}
     return SQPResult{T, V}(x, objective, iterations, converged,
-                           constraint_violation, status, nothing, 0, 0, 0, zero(T), 0)
+                           constraint_violation, status, nothing, 0, 0, 0, zero(T), 0,
+                           0, 0, 0, 0)
 end
 
 """

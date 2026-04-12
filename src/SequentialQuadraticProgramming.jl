@@ -18,6 +18,7 @@ include("line_search.jl")
 include("hessian_update.jl")
 include("qp_subproblem.jl")
 include("trust_region.jl")
+include("filter.jl")
 include("solver.jl")
 
 export sqp_solve, SQPOptions, SQPResult, NLPProblem, COSMOQPSolver

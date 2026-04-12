@@ -141,10 +141,16 @@ function test_hs108()
     h(x) = zeros(0)
     lb = zeros(length(x0))
     ub = 80000.0 * ones(length(x0))
-    result = sqp_solve(f, g, h, x0, lb, ub; options = SQPOptions(max_iterations = 2000))
-    # HS108 converges slowly; check constraint feasibility and objective improvement
-    @test_broken result.converged
-    @test result.objective < -0.3
+    # HS108 is a highly nonlinear problem with bilinear objective and 14
+    # quadratic inequality constraints. With the default `:bfgs` Hessian
+    # strategy the solver stalls at a feasible but non-optimal point
+    # (obj ≈ -0.34). The `:analytical` strategy (Phase 9.0 eigenvalue-
+    # corrected true Hessian) reaches the known optimum -0.8660254.
+    result = sqp_solve(f, g, h, x0, lb, ub;
+                       options = SQPOptions(max_iterations = 500,
+                                            hessian_strategy = :analytical))
+    @test result.converged
+    @test isapprox(result.objective, -0.8660254, atol = 1e-3)
     @test result.constraint_violation < 1e-6
 end
 
