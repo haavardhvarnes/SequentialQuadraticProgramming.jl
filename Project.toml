@@ -1,7 +1,7 @@
 name = "SequentialQuadraticProgramming"
 uuid = "f5a3b3a0-7e4a-4e6b-8f3a-1c2d3e4f5a6b"
 authors = ["Havard Hvarnes"]
-version = "0.9.0"
+version = "0.9.1"
 
 [deps]
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
